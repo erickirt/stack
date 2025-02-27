@@ -70,18 +70,46 @@ export function trimEmptyLinesEnd(s: string): string {
 export function trimLines(s: string): string {
   return trimEmptyLinesEnd(trimEmptyLinesStart(s));
 }
+import.meta.vitest?.test("trimLines", ({ expect }) => {
+  expect(trimLines("")).toBe("");
+  expect(trimLines(" ")).toBe("");
+  expect(trimLines(" \n ")).toBe("");
+  expect(trimLines(" abc ")).toBe(" abc ");
+  expect(trimLines("\n  \nLine1\nLine2\n \n")).toBe("Line1\nLine2");
+  expect(trimLines("Line1\n   \nLine2")).toBe("Line1\n   \nLine2");
+  expect(trimLines(" \n    \n\t")).toBe("");
+  expect(trimLines("   Hello World")).toBe("   Hello World");
+  expect(trimLines("\n")).toBe("");
+  expect(trimLines("\t \n\t\tLine1 \n \nLine2\t\t\n\t  ")).toBe("\t\tLine1 \n \nLine2\t\t");
+});
+
 
 /**
  * A template literal tag that returns the same string as the template literal without a tag.
  *
  * Useful for implementing your own template literal tags.
  */
-export function templateIdentity(strings: TemplateStringsArray | readonly string[], ...values: any[]): string {
-  if (strings.length === 0) return "";
-  if (values.length !== strings.length - 1) throw new Error("Invalid number of values; must be one less than strings");
+export function templateIdentity(strings: TemplateStringsArray | readonly string[], ...values: string[]): string {
+  if (values.length !== strings.length - 1) throw new StackAssertionError("Invalid number of values; must be one less than strings", { strings, values });
 
-  return strings.slice(1).reduce((result, string, i) => `${result}${values[i] ?? "n/a"}${string}`, strings[0]);
+  return strings.reduce((result, str, i) => result + str + (values[i] ?? ''), '');
 }
+import.meta.vitest?.test("templateIdentity", ({ expect }) => {
+  expect(templateIdentity`Hello World`).toBe("Hello World");
+  expect(templateIdentity`${"Hello"}`).toBe("Hello");
+  const greeting = "Hello";
+  const subject = "World";
+  expect(templateIdentity`${greeting}, ${subject}!`).toBe("Hello, World!");
+  expect(templateIdentity`${"A"}${"B"}${"C"}`).toBe("ABC");
+  expect(templateIdentity`Start${""}Middle${""}End`).toBe("StartMiddleEnd");
+  expect(templateIdentity``).toBe("");
+  expect(templateIdentity`Line1
+Line2`).toBe("Line1\nLine2");
+  expect(templateIdentity(["a ", " scientific ", "gun"], "certain", "rail")).toBe("a certain scientific railgun");
+  expect(templateIdentity(["only one part"])).toBe("only one part");
+  expect(() => templateIdentity(["a ", "b", "c"], "only one")).toThrow("Invalid number of values");
+  expect(() => templateIdentity(["a", "b"], "x", "y")).toThrow("Invalid number of values");
+});
 
 
 export function deindent(code: string): string;
@@ -89,7 +117,7 @@ export function deindent(strings: TemplateStringsArray | readonly string[], ...v
 export function deindent(strings: string | readonly string[], ...values: any[]): string {
   if (typeof strings === "string") return deindent([strings]);
   if (strings.length === 0) return "";
-  if (values.length !== strings.length - 1) throw new Error("Invalid number of values; must be one less than strings");
+  if (values.length !== strings.length - 1) throw new StackAssertionError("Invalid number of values; must be one less than strings", { strings, values });
 
   const trimmedStrings = [...strings];
   trimmedStrings[0] = trimEmptyLinesStart(trimmedStrings[0]);
@@ -119,6 +147,7 @@ export function deindent(strings: string | readonly string[], ...values: any[]):
 }
 
 export function extractScopes(scope: string, removeDuplicates=true): string[] {
+  // TODO what is this for? can we move this into the OAuth code in the backend?
   const trimmedString = scope.trim();
   const scopesArray = trimmedString.split(/\s+/);
   const filtered = scopesArray.filter(scope => scope.length > 0);
@@ -126,10 +155,14 @@ export function extractScopes(scope: string, removeDuplicates=true): string[] {
 }
 
 export function mergeScopeStrings(...scopes: string[]): string {
+  // TODO what is this for? can we move this into the OAuth code in the backend?
   const allScope = scopes.map((s) => extractScopes(s)).flat().join(" ");
   return extractScopes(allScope).join(" ");
 }
 
+export function escapeTemplateLiteral(s: string): string {
+  return s.replaceAll("`", "\\`").replaceAll("\\", "\\\\").replaceAll("$", "\\$");
+}
 
 /**
  * Some classes have different constructor names in different environments (eg. `Headers` is sometimes called `_Headers`,
@@ -218,8 +251,23 @@ export function nicify(
   };
 
   switch (typeof value) {
-    case "string": case "boolean": case "number": {
+    case "boolean": case "number": {
       return JSON.stringify(value);
+    }
+    case "string": {
+      const isDeindentable = (v: string) => deindent(v) === v && v.includes("\n");
+      const wrapInDeindent = (v: string) => deindent`
+        deindent\`
+        ${currentIndent + lineIndent}${escapeTemplateLiteral(value).replaceAll("\n", nl + lineIndent)}
+        ${currentIndent}\`
+      `;
+      if (isDeindentable(value)) {
+        return wrapInDeindent(value);
+      } else if (value.endsWith("\n") && isDeindentable(value.slice(0, -1))) {
+        return wrapInDeindent(value.slice(0, -1)) + ' + "\\n"';
+      } else {
+        return JSON.stringify(value);
+      }
     }
     case "undefined": {
       return "undefined";
@@ -251,7 +299,7 @@ export function nicify(
         }
       }
       if (value instanceof URL) {
-        return `URL(${JSON.stringify(value.toString())})`;
+        return `URL(${nicify(value.toString())})`;
       }
       if (ArrayBuffer.isView(value)) {
         return `${value.constructor.name}([${value.toString()}])`;

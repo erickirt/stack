@@ -1,8 +1,9 @@
 import "../polyfills";
 
-import { getUser, getUserQuery } from "@/app/api/v1/users/crud";
+import { getUser, getUserQuery } from "@/app/api/latest/users/crud";
 import { checkApiKeySet, checkApiKeySetQuery } from "@/lib/api-keys";
 import { getProjectQuery, listManagedProjectIds } from "@/lib/projects";
+import { Tenancy, getSoleTenancyFromProject } from "@/lib/tenancies";
 import { decodeAccessToken } from "@/lib/tokens";
 import { rawQueryAll } from "@/prisma-client";
 import { withTraceSpan } from "@/utils/telemetry";
@@ -12,7 +13,7 @@ import { UsersCrud } from "@stackframe/stack-shared/dist/interface/crud/users";
 import { StackAdaptSentinel, yupValidate } from "@stackframe/stack-shared/dist/schema-fields";
 import { groupBy, typedIncludes } from "@stackframe/stack-shared/dist/utils/arrays";
 import { getNodeEnvironment } from "@stackframe/stack-shared/dist/utils/env";
-import { StackAssertionError, StatusError, throwErr } from "@stackframe/stack-shared/dist/utils/errors";
+import { StackAssertionError, StatusError, captureError, throwErr } from "@stackframe/stack-shared/dist/utils/errors";
 import { deindent } from "@stackframe/stack-shared/dist/utils/strings";
 import { NextRequest } from "next/server";
 import * as yup from "yup";
@@ -21,6 +22,8 @@ const allowedMethods = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as c
 
 export type SmartRequestAuth = {
   project: ProjectsCrud["Admin"]["Read"],
+  branchId: string,
+  tenancy: Tenancy,
   user?: UsersCrud["Admin"]["Read"] | undefined,
   type: "client" | "server" | "admin",
 };
@@ -45,9 +48,24 @@ export type SmartRequest = {
 };
 
 export type MergeSmartRequest<T, MSQ = SmartRequest> =
-  StackAdaptSentinel extends T ? NonNullable<MSQ> | (MSQ & Exclude<T, StackAdaptSentinel>) : (
-    T extends object ? (MSQ extends object ? { [K in keyof T & keyof MSQ]: MergeSmartRequest<T[K], MSQ[K]> } : (T & MSQ))
-    : (T & MSQ)
+  StackAdaptSentinel extends T
+  ? NonNullable<MSQ> | (MSQ & Exclude<T, StackAdaptSentinel>)
+  : (
+    T extends (infer U)[]
+    ? (
+      MSQ extends (infer V)[]
+      ? (T & MSQ) & { [K in keyof T & keyof MSQ]: MergeSmartRequest<T[K], MSQ[K]> }
+      : (T & MSQ)
+    )
+    : (
+      T extends object
+      ? (
+        MSQ extends object
+        ? { [K in keyof T & keyof MSQ]: MergeSmartRequest<T[K], MSQ[K]> }
+        : (T & MSQ)
+      )
+      : (T & MSQ)
+    )
   );
 
 async function validate<T>(obj: SmartRequest, schema: yup.Schema<T>, req: NextRequest | null): Promise<T> {
@@ -166,7 +184,7 @@ const parseAuth = withTraceSpan('smart request parseAuth', async (req: NextReque
     const result = await decodeAccessToken(options.token);
     if (result.status === "error") {
       if (result.error instanceof KnownErrors.AccessTokenExpired) {
-        throw new KnownErrors.AdminAccessTokenExpired();
+        throw new KnownErrors.AdminAccessTokenExpired(result.error.constructorArgs[0]);
       } else {
         throw new KnownErrors.UnparsableAdminAccessToken();
       }
@@ -176,10 +194,12 @@ const parseAuth = withTraceSpan('smart request parseAuth', async (req: NextReque
       throw new KnownErrors.AdminAccessTokenIsNotAdmin();
     }
 
-    const user = await getUser({ projectId: 'internal', userId: result.data.userId });
+    const user = await getUser({ projectId: 'internal', branchId: 'main', userId: result.data.userId });
     if (!user) {
       // this is the case when access token is still valid, but the user is deleted from the database
-      throw new KnownErrors.AdminAccessTokenExpired();
+      // this should be very rare, let's log it on Sentry when it happens
+      captureError("admin-access-token-expiration", new StackAssertionError("User not found for admin access token. This may not be a bug, but it's worth investigating"));
+      throw new StatusError(401, "The user associated with the admin access token is no longer valid. Please refresh the admin access token and try again.");
     }
 
     const allProjects = listManagedProjectIds(user);
@@ -195,7 +215,7 @@ const parseAuth = withTraceSpan('smart request parseAuth', async (req: NextReque
   // Because smart route handlers are always called, we instead send over a single raw query that fetches all the
   // data at the same time, saving us a lot of requests
   const bundledQueries = {
-    user: projectId && accessToken ? getUserQuery(projectId, await extractUserIdFromAccessToken({ token: accessToken, projectId })) : undefined,
+    user: projectId && accessToken ? getUserQuery(projectId, null, await extractUserIdFromAccessToken({ token: accessToken, projectId })) : undefined,
     isClientKeyValid: projectId && publishableClientKey && requestType === "client" ? checkApiKeySetQuery(projectId, { publishableClientKey }) : undefined,
     isServerKeyValid: projectId && secretServerKey && requestType === "server" ? checkApiKeySetQuery(projectId, { secretServerKey }) : undefined,
     isAdminKeyValid: projectId && superSecretAdminKey && requestType === "admin" ? checkApiKeySetQuery(projectId, { superSecretAdminKey }) : undefined,
@@ -250,11 +270,14 @@ const parseAuth = withTraceSpan('smart request parseAuth', async (req: NextReque
 
   const project = queriesResults.project;
   if (!project) {
-    throw new StackAssertionError("Project not found; this should never happen because passing the checks until here should guarantee that the project exists and that access to it is granted", { projectId });
+    // This happens when the JWT tokens are still valid, but the project has been deleted
+    throw new KnownErrors.ProjectNotFound(projectId);
   }
 
   return {
     project,
+    branchId: "main",
+    tenancy: await getSoleTenancyFromProject(project),
     user: queriesResults.user ?? undefined,
     type: requestType,
   };

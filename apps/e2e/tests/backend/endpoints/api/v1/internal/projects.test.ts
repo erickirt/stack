@@ -11,7 +11,11 @@ it("should not have have access to the project", async ({ expect }) => {
       "body": {
         "code": "ACCESS_TYPE_WITHOUT_PROJECT_ID",
         "details": { "request_type": "client" },
-        "error": "The x-stack-access-type header was 'client', but the x-stack-project-id header was not provided.\\n\\nFor more information, see the docs on REST API authentication: https://docs.stack-auth.com/rest-api/overview#authentication",
+        "error": deindent\`
+          The x-stack-access-type header was 'client', but the x-stack-project-id header was not provided.
+          
+          For more information, see the docs on REST API authentication: https://docs.stack-auth.com/rest-api/overview#authentication
+        \`,
       },
       "headers": Headers {
         "x-stack-known-error": "ACCESS_TYPE_WITHOUT_PROJECT_ID",
@@ -74,7 +78,6 @@ it("creates a new project", async ({ expect }) => {
           "email_config": { "type": "shared" },
           "enabled_oauth_providers": [],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [],
           "passkey_enabled": false,
@@ -122,7 +125,6 @@ it("creates a new project with different configurations", async ({ expect }) => 
           "email_config": { "type": "shared" },
           "enabled_oauth_providers": [],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": true,
           "oauth_providers": [],
           "passkey_enabled": false,
@@ -175,7 +177,6 @@ it("creates a new project with different configurations", async ({ expect }) => 
           "email_config": { "type": "shared" },
           "enabled_oauth_providers": [{ "id": "google" }],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [
             {
@@ -230,7 +231,6 @@ it("creates a new project with different configurations", async ({ expect }) => 
           "email_config": { "type": "shared" },
           "enabled_oauth_providers": [],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [],
           "passkey_enabled": false,
@@ -286,7 +286,6 @@ it("creates a new project with different configurations", async ({ expect }) => 
           },
           "enabled_oauth_providers": [],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [],
           "passkey_enabled": false,
@@ -344,7 +343,6 @@ it("creates a new project with different configurations", async ({ expect }) => 
           "email_config": { "type": "shared" },
           "enabled_oauth_providers": [],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [],
           "passkey_enabled": false,
@@ -385,7 +383,6 @@ it("lists the current projects after creating a new project", async ({ expect })
               "email_config": { "type": "shared" },
               "enabled_oauth_providers": [],
               "id": "<stripped UUID>",
-              "legacy_global_jwt_signing": false,
               "magic_link_enabled": false,
               "oauth_providers": [],
               "passkey_enabled": false,

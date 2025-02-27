@@ -14,7 +14,11 @@ it("should not have have access to the project without project keys", async ({ e
       "body": {
         "code": "ACCESS_TYPE_WITHOUT_PROJECT_ID",
         "details": { "request_type": "client" },
-        "error": "The x-stack-access-type header was 'client', but the x-stack-project-id header was not provided.\\n\\nFor more information, see the docs on REST API authentication: https://docs.stack-auth.com/rest-api/overview#authentication",
+        "error": deindent\`
+          The x-stack-access-type header was 'client', but the x-stack-project-id header was not provided.
+          
+          For more information, see the docs on REST API authentication: https://docs.stack-auth.com/rest-api/overview#authentication
+        \`,
       },
       "headers": Headers {
         "x-stack-known-error": "ACCESS_TYPE_WITHOUT_PROJECT_ID",
@@ -75,7 +79,6 @@ it("creates and updates the basic project information of a project", async ({ ex
           "email_config": { "type": "shared" },
           "enabled_oauth_providers": [],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [],
           "passkey_enabled": false,
@@ -120,7 +123,6 @@ it("updates the basic project configuration", async ({ expect }) => {
           "email_config": { "type": "shared" },
           "enabled_oauth_providers": [],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": true,
           "oauth_providers": [],
           "passkey_enabled": false,
@@ -170,7 +172,6 @@ it("updates the project domains configuration", async ({ expect }) => {
           "email_config": { "type": "shared" },
           "enabled_oauth_providers": [],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [],
           "passkey_enabled": false,
@@ -226,7 +227,6 @@ it("updates the project domains configuration", async ({ expect }) => {
           "email_config": { "type": "shared" },
           "enabled_oauth_providers": [],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [],
           "passkey_enabled": false,
@@ -270,6 +270,90 @@ it("is not allowed to have two identical domains", async ({ expect }) => {
   `);
 });
 
+it("should allow insecure HTTP connections if insecureHttp is true", async ({ expect }) => {
+  await Auth.Otp.signIn();
+  const { adminAccessToken } = await Project.createAndGetAdminToken();
+  const { updateProjectResponse: response } = await Project.updateCurrent(adminAccessToken, {
+    config: {
+      domains: [{
+        domain: 'http://insecure-domain.stack-test.example.com',
+        handler_path: '/handler'
+      }]
+    },
+  });
+  expect(response).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 200,
+      "body": {
+        "config": {
+          "allow_localhost": true,
+          "client_team_creation_enabled": false,
+          "client_user_deletion_enabled": false,
+          "create_team_on_sign_up": false,
+          "credential_enabled": true,
+          "domains": [
+            {
+              "domain": "http://insecure-domain.stack-test.example.com",
+              "handler_path": "/handler",
+            },
+          ],
+          "email_config": { "type": "shared" },
+          "enabled_oauth_providers": [],
+          "id": "<stripped UUID>",
+          "magic_link_enabled": false,
+          "oauth_providers": [],
+          "passkey_enabled": false,
+          "sign_up_enabled": true,
+          "team_creator_default_permissions": [{ "id": "admin" }],
+          "team_member_default_permissions": [{ "id": "member" }],
+        },
+        "created_at_millis": <stripped field 'created_at_millis'>,
+        "description": "",
+        "display_name": "New Project",
+        "id": "<stripped UUID>",
+        "is_production_mode": false,
+        "user_count": 0,
+      },
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
+});
+
+it("should not allow protocols other than http(s) in trusted domains", async ({ expect }) => {
+  await Auth.Otp.signIn();
+  const { adminAccessToken } = await Project.createAndGetAdminToken();
+  const { updateProjectResponse: response } = await Project.updateCurrent(adminAccessToken, {
+    config: {
+      domains: [{
+        domain: 'whatever://disallowed-domain.stack-test.example.com',
+        handler_path: '/handler'
+      }]
+    },
+  });
+  expect(response).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": {
+        "code": "SCHEMA_ERROR",
+        "details": {
+          "message": deindent\`
+            Request validation failed on PATCH /api/v1/projects/current:
+              - URL must start with http:// or https://
+          \`,
+        },
+        "error": deindent\`
+          Request validation failed on PATCH /api/v1/projects/current:
+            - URL must start with http:// or https://
+        \`,
+      },
+      "headers": Headers {
+        "x-stack-known-error": "SCHEMA_ERROR",
+        <some fields may have been hidden>,
+      },
+    }
+  `);
+});
+
 it("updates the project email configuration", async ({ expect }) => {
   await Auth.Otp.signIn();
   const { adminAccessToken } = await Project.createAndGetAdminToken();
@@ -308,7 +392,6 @@ it("updates the project email configuration", async ({ expect }) => {
           },
           "enabled_oauth_providers": [],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [],
           "passkey_enabled": false,
@@ -363,7 +446,6 @@ it("updates the project email configuration", async ({ expect }) => {
           },
           "enabled_oauth_providers": [],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [],
           "passkey_enabled": false,
@@ -404,7 +486,6 @@ it("updates the project email configuration", async ({ expect }) => {
           "email_config": { "type": "shared" },
           "enabled_oauth_providers": [],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [],
           "passkey_enabled": false,
@@ -445,7 +526,6 @@ it("updates the project email configuration", async ({ expect }) => {
           "email_config": { "type": "shared" },
           "enabled_oauth_providers": [],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [],
           "passkey_enabled": false,
@@ -500,7 +580,6 @@ it("updates the project email configuration", async ({ expect }) => {
           },
           "enabled_oauth_providers": [],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [],
           "passkey_enabled": false,
@@ -540,8 +619,16 @@ it("does not update project email config to empty host", async ({ expect }) => {
       "status": 400,
       "body": {
         "code": "SCHEMA_ERROR",
-        "details": { "message": "Request validation failed on PATCH /api/v1/projects/current:\\n  - body.config.email_config.host must not be empty" },
-        "error": "Request validation failed on PATCH /api/v1/projects/current:\\n  - body.config.email_config.host must not be empty",
+        "details": {
+          "message": deindent\`
+            Request validation failed on PATCH /api/v1/projects/current:
+              - body.config.email_config.host must not be empty
+          \`,
+        },
+        "error": deindent\`
+          Request validation failed on PATCH /api/v1/projects/current:
+            - body.config.email_config.host must not be empty
+        \`,
       },
       "headers": Headers {
         "x-stack-known-error": "SCHEMA_ERROR",
@@ -567,8 +654,16 @@ it("updates the project email configuration with invalid parameters", async ({ e
       "status": 400,
       "body": {
         "code": "SCHEMA_ERROR",
-        "details": { "message": "Request validation failed on PATCH /api/v1/projects/current:\\n  - body.config.email_config contains unknown properties: client_id" },
-        "error": "Request validation failed on PATCH /api/v1/projects/current:\\n  - body.config.email_config contains unknown properties: client_id",
+        "details": {
+          "message": deindent\`
+            Request validation failed on PATCH /api/v1/projects/current:
+              - body.config.email_config contains unknown properties: client_id
+          \`,
+        },
+        "error": deindent\`
+          Request validation failed on PATCH /api/v1/projects/current:
+            - body.config.email_config contains unknown properties: client_id
+        \`,
       },
       "headers": Headers {
         "x-stack-known-error": "SCHEMA_ERROR",
@@ -590,8 +685,26 @@ it("updates the project email configuration with invalid parameters", async ({ e
         "status": 400,
         "body": {
           "code": "SCHEMA_ERROR",
-          "details": { "message": "Request validation failed on PATCH /api/v1/projects/current:\\n  - body.config.email_config.host must be defined\\n  - body.config.email_config.port must be defined\\n  - body.config.email_config.username must be defined\\n  - body.config.email_config.password must be defined\\n  - body.config.email_config.sender_name must be defined\\n  - body.config.email_config.sender_email must be defined" },
-          "error": "Request validation failed on PATCH /api/v1/projects/current:\\n  - body.config.email_config.host must be defined\\n  - body.config.email_config.port must be defined\\n  - body.config.email_config.username must be defined\\n  - body.config.email_config.password must be defined\\n  - body.config.email_config.sender_name must be defined\\n  - body.config.email_config.sender_email must be defined",
+          "details": {
+            "message": deindent\`
+              Request validation failed on PATCH /api/v1/projects/current:
+                - body.config.email_config.host must be defined
+                - body.config.email_config.port must be defined
+                - body.config.email_config.username must be defined
+                - body.config.email_config.password must be defined
+                - body.config.email_config.sender_name must be defined
+                - body.config.email_config.sender_email must be defined
+            \`,
+          },
+          "error": deindent\`
+            Request validation failed on PATCH /api/v1/projects/current:
+              - body.config.email_config.host must be defined
+              - body.config.email_config.port must be defined
+              - body.config.email_config.username must be defined
+              - body.config.email_config.password must be defined
+              - body.config.email_config.sender_name must be defined
+              - body.config.email_config.sender_email must be defined
+          \`,
         },
         "headers": Headers {
           "x-stack-known-error": "SCHEMA_ERROR",
@@ -629,7 +742,6 @@ it("updates the project oauth configuration", async ({ expect }) => {
           "email_config": { "type": "shared" },
           "enabled_oauth_providers": [{ "id": "google" }],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [
             {
@@ -678,7 +790,6 @@ it("updates the project oauth configuration", async ({ expect }) => {
           "email_config": { "type": "shared" },
           "enabled_oauth_providers": [{ "id": "google" }],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [
             {
@@ -729,7 +840,6 @@ it("updates the project oauth configuration", async ({ expect }) => {
           "email_config": { "type": "shared" },
           "enabled_oauth_providers": [{ "id": "google" }],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [
             {
@@ -808,7 +918,6 @@ it("updates the project oauth configuration", async ({ expect }) => {
             { "id": "spotify" },
           ],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [
             {
@@ -869,7 +978,6 @@ it("updates the project oauth configuration", async ({ expect }) => {
           "email_config": { "type": "shared" },
           "enabled_oauth_providers": [{ "id": "spotify" }],
           "id": "<stripped UUID>",
-          "legacy_global_jwt_signing": false,
           "magic_link_enabled": false,
           "oauth_providers": [
             {
@@ -922,8 +1030,16 @@ it("fails when trying to update OAuth provider with empty client_secret", async 
       "status": 400,
       "body": {
         "code": "SCHEMA_ERROR",
-        "details": { "message": "Request validation failed on PATCH /api/v1/projects/current:\\n  - body.config.oauth_providers[0].client_secret must not be empty" },
-        "error": "Request validation failed on PATCH /api/v1/projects/current:\\n  - body.config.oauth_providers[0].client_secret must not be empty",
+        "details": {
+          "message": deindent\`
+            Request validation failed on PATCH /api/v1/projects/current:
+              - body.config.oauth_providers[0].client_secret must not be empty
+          \`,
+        },
+        "error": deindent\`
+          Request validation failed on PATCH /api/v1/projects/current:
+            - body.config.oauth_providers[0].client_secret must not be empty
+        \`,
       },
       "headers": Headers {
         "x-stack-known-error": "SCHEMA_ERROR",

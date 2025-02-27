@@ -2,7 +2,10 @@
 
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { Link } from "@/components/link";
+import { Logo } from "@/components/logo";
 import { ProjectSwitcher } from "@/components/project-switcher";
+import ThemeToggle from "@/components/theme-toggle";
+import { getPublicEnvVar } from '@/lib/env';
 import { cn } from "@/lib/utils";
 import { AdminProject, UserButton, useUser } from "@stackframe/stack";
 import { EMAIL_TEMPLATES_METADATA } from "@stackframe/stack-emails/dist/utils";
@@ -80,6 +83,26 @@ const navigationItems: (Label | Item | Hidden)[] = [
     regex: /^\/projects\/[^\/]+\/users$/,
     icon: User,
     type: 'item'
+  },
+  {
+    name: (pathname: string) => {
+      const match = pathname.match(/^\/projects\/[^\/]+\/users\/([^\/]+)$/);
+      let item;
+      let href;
+      if (match) {
+        item = <UserBreadcrumbItem key='user-display-name' userId={match[1]} />;
+        href = `/users/${match[1]}`;
+      } else {
+        item = "Users";
+        href = "";
+      }
+      return [
+        { item: "Users", href: "/users" },
+        { item, href },
+      ];
+    },
+    regex: /^\/projects\/[^\/]+\/users\/[^\/]+$/,
+    type: 'hidden',
   },
   {
     name: "Auth Methods",
@@ -224,10 +247,22 @@ function TeamMemberBreadcrumbItem(props: { teamId: string }) {
   }
 }
 
+function UserBreadcrumbItem(props: { userId: string }) {
+  const stackAdminApp = useAdminApp();
+  const user = stackAdminApp.useUser(props.userId);
+
+  if (!user) {
+    return null;
+  } else {
+    return user.displayName ?? user.primaryEmail ?? user.id;
+  }
+}
+
 function NavItem({ item, href, onClick }: { item: Item, href: string, onClick?: () => void}) {
   const pathname = usePathname();
   const selected = useMemo(() => {
-    return item.regex.test(pathname);
+    let pathnameWithoutTrailingSlash = pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
+    return item.regex.test(pathnameWithoutTrailingSlash);
   }, [item.regex, pathname]);
 
   return (
@@ -235,8 +270,8 @@ function NavItem({ item, href, onClick }: { item: Item, href: string, onClick?: 
       href={href}
       className={cn(
         buttonVariants({ variant: 'ghost', size: "sm" }),
-        selected && "bg-muted",
         "flex-grow justify-start text-md text-zinc-800 dark:text-zinc-300 px-2",
+        selected && "bg-muted",
       )}
       onClick={onClick}
       prefetch={true}
@@ -251,7 +286,13 @@ function SidebarContent({ projectId, onNavigate }: { projectId: string, onNaviga
   return (
     <div className="flex flex-col h-full items-stretch">
       <div className="h-14 border-b flex items-center px-2 shrink-0">
-        <ProjectSwitcher currentProjectId={projectId} />
+        {getPublicEnvVar("NEXT_PUBLIC_STACK_EMULATOR_ENABLED") === "true" ? (
+          <div className="flex-grow mx-2">
+            <Logo full width={80} />
+          </div>
+        ) : (
+          <ProjectSwitcher currentProjectId={projectId} />
+        )}
       </div>
       <div className="flex flex-grow flex-col gap-1 pt-2 overflow-y-auto">
         {navigationItems.map((item, index) => {
@@ -344,16 +385,20 @@ function HeaderBreadcrumb({
     return (
       <Breadcrumb>
         <BreadcrumbList>
-          <BreadcrumbItem>
-            <Link href="/projects">Home</Link>
-          </BreadcrumbItem>
-          <BreadcrumbSeparator />
-          <BreadcrumbItem>
-            <span className="max-w-40 truncate">
-              <Link href={`/projects/${projectId}`}>{selectedProject?.displayName}</Link>
-            </span>
-          </BreadcrumbItem>
-          <BreadcrumbSeparator />
+          {getPublicEnvVar("NEXT_PUBLIC_STACK_EMULATOR_ENABLED") !== "true" &&
+            <>
+              <BreadcrumbItem>
+                <Link href="/projects">Home</Link>
+              </BreadcrumbItem>
+              <BreadcrumbSeparator />
+              <BreadcrumbItem>
+                <span className="max-w-40 truncate">
+                  <Link href={`/projects/${projectId}`}>{selectedProject?.displayName}</Link>
+                </span>
+              </BreadcrumbItem>
+              <BreadcrumbSeparator />
+            </>}
+
           {breadcrumbItems.map((name, index) => (
             index < breadcrumbItems.length - 1 ?
               <Fragment key={index}>
@@ -382,11 +427,21 @@ export default function SidebarLayout(props: { projectId: string, children?: Rea
 
   return (
     <div className="w-full flex">
-      <div className="flex-col border-r min-w-[240px] h-screen sticky top-0 hidden md:flex">
+      <div style={{
+        width: "160vw",
+        height: "180vmin",
+        position: "fixed",
+        top: "100%",
+        left: "50%",
+        transform: "translate(-50%, -10%)",
+        zIndex: -10000,
+        backgroundImage: "radial-gradient(50% 50% at 50% 50%,#4b5df7 0,#4b5df773 23%,#4b5df740 50%,#4b5df700)",
+      }} />
+      <div className="flex-col border-r min-w-[240px] h-screen sticky top-0 hidden md:flex backdrop-blur-md bg-white/20 dark:bg-black/20 z-[10]">
         <SidebarContent projectId={props.projectId} />
       </div>
       <div className="flex flex-col flex-grow w-0">
-        <div className="h-14 border-b flex items-center justify-between sticky top-0 bg-white dark:bg-black z-10 px-4 md:px-6">
+        <div className="h-14 border-b flex items-center justify-between sticky top-0 backdrop-blur-md bg-white/20 dark:bg-black/20 z-10 px-4 md:px-6">
           <div className="hidden md:flex">
             <HeaderBreadcrumb projectId={props.projectId} />
           </div>
@@ -415,7 +470,10 @@ export default function SidebarLayout(props: { projectId: string, children?: Rea
             <FeedbackDialog
               trigger={<Button variant="outline" size='sm'>Feedback</Button>}
             />
-            <UserButton colorModeToggle={() => setTheme(resolvedTheme === 'light' ? 'dark' : 'light')}/>
+            {getPublicEnvVar("NEXT_PUBLIC_STACK_EMULATOR_ENABLED") === "true" ?
+              <ThemeToggle /> :
+              <UserButton colorModeToggle={() => setTheme(resolvedTheme === 'light' ? 'dark' : 'light')}/>
+            }
           </div>
         </div>
         <div className="flex-grow relative">

@@ -340,11 +340,12 @@ const UnparsableAdminAccessToken = createKnownErrorConstructor(
 const AdminAccessTokenExpired = createKnownErrorConstructor(
   InvalidAdminAccessToken,
   "ADMIN_ACCESS_TOKEN_EXPIRED",
-  () => [
+  (expiredAt: Date | undefined) => [
     401,
-    "Admin access token has expired. Please refresh it and try again.",
+    `Admin access token has expired. Please refresh it and try again.${expiredAt ? ` (The access token expired at ${expiredAt.toISOString()}.)`: ""}`,
+    { expired_at_millis: expiredAt?.getTime() ?? null },
   ] as const,
-  () => [] as const,
+  (json: any) => [json.expired_at_millis ?? undefined] as const,
 );
 
 const InvalidProjectForAdminAccessToken = createKnownErrorConstructor(
@@ -500,11 +501,12 @@ const UnparsableAccessToken = createKnownErrorConstructor(
 const AccessTokenExpired = createKnownErrorConstructor(
   InvalidAccessToken,
   "ACCESS_TOKEN_EXPIRED",
-  () => [
+  (expiredAt: Date | undefined) => [
     401,
-    "Access token has expired. Please refresh it and try again.",
+    `Access token has expired. Please refresh it and try again.${expiredAt ? ` (The access token expired at ${expiredAt.toISOString()}.)`: ""}`,
+    { expired_at_millis: expiredAt?.getTime() ?? null },
   ] as const,
-  () => [] as const,
+  (json: any) => [json.expired_at_millis ?? undefined] as const,
 );
 
 const InvalidProjectForAccessToken = createKnownErrorConstructor(
@@ -549,7 +551,7 @@ const UserEmailAlreadyExists = createKnownErrorConstructor(
   KnownError,
   "USER_EMAIL_ALREADY_EXISTS",
   () => [
-    400,
+    409,
     "User email already exists.",
   ] as const,
   () => [] as const,
@@ -743,7 +745,7 @@ const VerificationCodeAlreadyUsed = createKnownErrorConstructor(
   VerificationCodeError,
   "VERIFICATION_CODE_ALREADY_USED",
   () => [
-    400,
+    409,
     "The verification link has already been used.",
   ] as const,
   () => [] as const,
@@ -773,7 +775,7 @@ const EmailAlreadyVerified = createKnownErrorConstructor(
   KnownError,
   "EMAIL_ALREADY_VERIFIED",
   () => [
-    400,
+    409,
     "The e-mail is already verified.",
   ] as const,
   () => [] as const,
@@ -883,7 +885,7 @@ const TeamAlreadyExists = createKnownErrorConstructor(
   KnownError,
   "TEAM_ALREADY_EXISTS",
   (teamId: string) => [
-    400,
+    409,
     `Team ${teamId} already exists.`,
     {
       team_id: teamId,
@@ -911,7 +913,7 @@ const EmailTemplateAlreadyExists = createKnownErrorConstructor(
   KnownError,
   "EMAIL_TEMPLATE_ALREADY_EXISTS",
   () => [
-    400,
+    409,
     "Email template already exists.",
   ] as const,
   () => [] as const,
@@ -931,7 +933,7 @@ const OAuthConnectionAlreadyConnectedToAnotherUser = createKnownErrorConstructor
   KnownError,
   "OAUTH_CONNECTION_ALREADY_CONNECTED_TO_ANOTHER_USER",
   () => [
-    400,
+    409,
     "The OAuth connection is already connected to another user.",
   ] as const,
   () => [] as const,
@@ -994,7 +996,7 @@ const UserAlreadyConnectedToAnotherOAuthConnection = createKnownErrorConstructor
   KnownError,
   "USER_ALREADY_CONNECTED_TO_ANOTHER_OAUTH_CONNECTION",
   () => [
-    400,
+    409,
     "The user is already connected to another OAuth account. Did you maybe selected the wrong account?",
   ] as const,
   () => [] as const,
@@ -1057,7 +1059,7 @@ const TeamMembershipAlreadyExists = createKnownErrorConstructor(
   KnownError,
   "TEAM_MEMBERSHIP_ALREADY_EXISTS",
   () => [
-    400,
+    409,
     "Team membership already exists.",
   ] as const,
   () => [] as const,
@@ -1143,7 +1145,7 @@ const ContactChannelAlreadyUsedForAuthBySomeoneElse = createKnownErrorConstructo
   KnownError,
   "CONTACT_CHANNEL_ALREADY_USED_FOR_AUTH_BY_SOMEONE_ELSE",
   (type: "email") => [
-    400,
+    409,
     `This ${type} is already used for authentication by another account.`,
     { type },
   ] as const,

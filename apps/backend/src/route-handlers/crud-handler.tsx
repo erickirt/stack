@@ -1,5 +1,7 @@
 import "../polyfills";
 
+import { Tenancy, getSoleTenancyFromProject } from "@/lib/tenancies";
+import { traceSpan } from "@/utils/telemetry";
 import { CrudSchema, CrudTypeOf, CrudlOperation } from "@stackframe/stack-shared/dist/crud";
 import { ProjectsCrud } from "@stackframe/stack-shared/dist/interface/crud/projects";
 import { UsersCrud } from "@stackframe/stack-shared/dist/interface/crud/users";
@@ -71,10 +73,10 @@ type CrudHandlerDirectByAccess<
 > = {
   [K in L as `${Uncapitalize<A>}${K}`]: (options:
     & {
-      project: ProjectsCrud["Admin"]["Read"],
       user?: UsersCrud["Admin"]["Read"],
       allowedErrorTypes?: (new (...args: any) => any)[],
     }
+    & ({ project: ProjectsCrud["Admin"]["Read"], branchId: string } | { tenancy: Tenancy })
     & (({} extends yup.InferType<QS> ? {} : never) | { query: yup.InferType<QS> })
     & (L extends "Create" | "List" ? Partial<yup.InferType<PS>> : yup.InferType<PS>)
     & (K extends "Read" | "List" | "Delete" ? {} : (K extends keyof T[A] ? { data: T[A][K] } : "TYPE ERROR: something went wrong here"))
@@ -238,23 +240,40 @@ export function createCrudHandlers<
           ...[...aat].map(([accessType, { invoke }]) => (
             [
               `${accessType}${crudOperation}`,
-              async ({ user, project, data, query, allowedErrorTypes, ...params }: yup.InferType<PS> & {
+              async ({ user, project, branchId, tenancy, data, query, allowedErrorTypes, ...params }: yup.InferType<PS> & {
                 query?: yup.InferType<QS>,
-                project: ProjectsCrud["Admin"]["Read"],
                 user?: UsersCrud["Admin"]["Read"],
+                project?: ProjectsCrud["Admin"]["Read"],
+                branchId?: string,
+                tenancy?: Tenancy,
                 data: any,
                 allowedErrorTypes?: (new (...args: any) => any)[],
               }) => {
+                if (tenancy && project) {
+                  throw new StackAssertionError("Must specify either project or tenancy, not both");
+                } else if (tenancy) {
+                  project = tenancy.project;
+                  branchId = tenancy.branchId;
+                } else if (project) {
+                  tenancy = await getSoleTenancyFromProject(project);
+                } else {
+                  throw new StackAssertionError("Must specify either project or tenancy");
+                }
+
                 try {
-                  return await invoke({
-                    params,
-                    query: query ?? {} as any,
-                    data,
-                    auth: {
-                      user,
-                      project,
-                      type: accessType,
-                    },
+                  return await traceSpan("invoking CRUD handler programmatically", async () => {
+                    return await invoke({
+                      params,
+                      query: query ?? {} as any,
+                      data,
+                      auth: {
+                        user,
+                        project: project ?? throwErr("Project not found in CRUD handler invocation", { project, tenancy }),
+                        branchId: branchId ?? throwErr("Branch ID not found in CRUD handler invocation", { project, branchId }),
+                        tenancy: tenancy ?? throwErr("Tenancy not found in CRUD handler invocation", { project, tenancy }),
+                        type: accessType,
+                      },
+                    });
                   });
                 } catch (error) {
                   if (allowedErrorTypes?.some((a) => error instanceof a) || error instanceof StackAssertionError) {
