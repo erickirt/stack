@@ -5,6 +5,7 @@
 // flyVolumeName) is load-bearing for every existing tenant: change a derivation and every
 // live app becomes an orphan. See fly/naming.ts.
 import { createHash } from "node:crypto";
+import { platformHostname } from "../platform-domain-names.js";
 import { BASE_IMAGE, BUILDER_IMAGE, BUILD_DOCKERFILE_DIR, BUILD_ENV_DIR, BUILD_TIMEOUT_SECONDS, FLY_DEFAULT_MEMORY_MB, RAILPACK_CLI_SHA256, RAILPACK_CLI_URL, RAILPACK_FRONTEND_IMAGE, RAILPACK_BUILDKIT_TMPFS_SIZE, SOFT_CONCURRENCY_LIMIT, flyBuilderGuestFor, flyConfig, flyGuestFor, flyVolumeName, getConfig, memorySizesFor, resolveNamespaceOrg, serviceMemoryMb } from "../config.js";
 import { buildCompletionPath, buildHarnessScript, computeWebhookToken, generatedDockerfile, type Builder } from "../builds.js";
 import { badRequest, conflict, notFound } from "../errors.js";
@@ -17,8 +18,8 @@ import { ReconciliationLeaseLostError, type ReconciliationLeaseGuard } from "../
 import { redactBuildLogText } from "../redact-build-log.js";
 import { assertServiceCanHoldADomain, desiredMachineCount, pinnedMachineCount, soleHttpPort, specIsPublic, specVolume, standardPortsHolderFor } from "../spec-helpers.js";
 import { claimDomain, listDomainClaimsForService, presignValidatedUploadGet, readDomainClaim, readDomainClaimVersioned, readSpec, releaseDomainClaim, rewriteDomainClaim } from "../store.js";
-import { portEntries, type DnsRecord, type PortEntry, type ServiceDomainState, type ServiceSpec, type StoredDeployment, type StoredSpec, type VolumeConfig } from "../types.js";
-import { FlyApiError, FlyClient, flyClientForNamespaceOrg, type FlyCertificate, type FlyMachine, type FlyVolume } from "./client.js";
+import { portEntries, type DnsRecord, type DomainStatus, type PortEntry, type ServiceDomainState, type ServiceSpec, type StoredDeployment, type StoredSpec, type VolumeConfig } from "../types.js";
+import { FlyApiError, FlyClient, flyClientForNamespaceOrg, type FlyCertificate, type FlyCertificateRequirements, type FlyMachine, type FlyVolume } from "./client.js";
 import { appNameForService, builderAppName, builderNetworkName, hostnameForService, networkForNamespace } from "./naming.js";
 
 function isReconciliationFencingError(error: unknown): boolean {
@@ -424,7 +425,7 @@ async function serviceAddress(fly: FlyClient, ns: string, key: string, stored: S
   let platformUrl: string | null = null;
   if (servesHttp) {
     if (specIsPublic(stored.spec)) {
-      platformUrl = `https://${appName}.fly.dev`;
+      platformUrl = `https://${platformHostname(envId, ns, key)}`;
     } else {
       const verified = (certificates ?? await fly.listCertificates(appName)).filter(certificateIsVerified).map((certificate) => certificate.hostname).sort();
       platformUrl = verified.length > 0 ? `https://${verified[0]}` : null;
@@ -440,34 +441,112 @@ async function serviceAddress(fly: FlyClient, ns: string, key: string, stored: S
   };
 }
 
-export function dnsRecordsForCertificate(appName: string, certificate: FlyCertificate, sharedIpv4: string | null, v6Addresses: string[]): DnsRecord[] {
-  const records: DnsRecord[] = [];
-  if (certificate.isApex) {
-    if (sharedIpv4 !== null) records.push({ type: "A", name: certificate.hostname, value: sharedIpv4 });
-    for (const address of v6Addresses) records.push({ type: "AAAA", name: certificate.hostname, value: address });
+/**
+ * The DNS a user must create, taken from what FLY says the hostname needs rather than
+ * re-derived from the app's IPs.
+ *
+ * The ownership TXT is emitted unconditionally while the hostname is unverified, not only
+ * when we detect a proxy. Fly accepts any ONE of three proofs — an AAAA pointing at the app,
+ * the `_acme-challenge` CNAME, or `_fly-ownership` — and the first two are exactly the two a
+ * CDN proxy breaks: the proxy answers A/AAAA with its own anycast addresses and terminates
+ * TLS, so the AAAA proof and TLS-ALPN-01 both fail. Since the ownership TXT is the only proof
+ * that survives proxying, is harmless when the other proofs also succeed, and cannot be
+ * guessed after the fact, showing it always beats making the user diagnose which case they
+ * are in. Ordered ownership-first for the same reason.
+ */
+export function dnsRecordsForRequirements(requirements: FlyCertificateRequirements): DnsRecord[] {
+  const { hostname, dns_requirements: dns } = requirements;
+  if (requirementsAreVerified(requirements)) return [];
+  const records: DnsRecord[] = [
+    // app_value, never org_value — see FlyCertificateRequirements. org_value would prove
+    // ownership to every app in the platform's Fly org, i.e. to every other tenant.
+    { type: "TXT", name: dns.ownership.name, value: dns.ownership.app_value },
+  ];
+  // Fly reports `a`/`aaaa` for an apex and `cname` for a subdomain, and populates both
+  // regardless; which one to USE is the apex question. An apex cannot hold a CNAME.
+  if (isApexHostname(hostname)) {
+    for (const address of dns.a) records.push({ type: "A", name: hostname, value: address });
+    for (const address of dns.aaaa) records.push({ type: "AAAA", name: hostname, value: address });
   } else {
-    records.push({ type: "CNAME", name: certificate.hostname, value: `${appName}.fly.dev` });
+    records.push({ type: "CNAME", name: hostname, value: dns.cname });
   }
-  if (!certificateIsVerified(certificate)) {
-    // Pre-issuance DNS validation: lets the cert issue before (or without) the main
-    // record cutting over.
-    records.push({ type: "CNAME", name: certificate.dnsValidationHostname, value: certificate.dnsValidationTarget });
-  }
+  // Pre-issuance DNS validation: lets the cert issue before (or without) the main
+  // record cutting over.
+  records.push({ type: "CNAME", name: dns.acme_challenge.name, value: dns.acme_challenge.target });
   return records;
+}
+
+// Fly's own `isApex` lives on the GraphQL certificate, which the requirements read does not
+// fetch. The label count is the same test Fly applies and needs no extra round trip.
+function isApexHostname(hostname: string): boolean {
+  return hostname.split(".").length <= 2;
+}
+
+function requirementsAreVerified(requirements: FlyCertificateRequirements): boolean {
+  return requirements.status === "Ready";
+}
+
+/**
+ * Derived from Fly's validation booleans rather than its status STRING, which is prose we do
+ * not control. "issuing" = Fly has accepted a proof of ownership and is waiting on the CA;
+ * that is the state the Fly dashboard shows as "Issuing", and the one a user otherwise
+ * cannot tell apart from having done nothing at all.
+ */
+export function domainStatusForRequirements(requirements: FlyCertificateRequirements): DomainStatus {
+  if (requirementsAreVerified(requirements)) return "verified";
+  const validation = requirements.validation;
+  const anyProofAccepted = validation.dns_configured
+    || validation.alpn_configured
+    || validation.http_configured
+    || validation.ownership_txt_configured;
+  return anyProofAccepted ? "issuing" : "awaiting_dns";
+}
+
+/**
+ * Fly's own remediation text for why a hostname is not verified yet, or null while nothing
+ * is wrong. Surfaced instead of discarded because "Awaiting configuration" alone gives the
+ * user nothing to act on.
+ */
+export function domainErrorForRequirements(requirements: FlyCertificateRequirements): string | null {
+  if (requirementsAreVerified(requirements)) return null;
+  // Length-checked rather than compared against undefined: the index signature is not
+  // optional under this tsconfig, so the comparison lints as a no-overlap check even though
+  // an empty array really does yield undefined at runtime.
+  if (requirements.validation_errors.length === 0) return null;
+  const first = requirements.validation_errors[0];
+  return first.remediation || first.message || null;
+}
+
+// Falls back to the GraphQL certificate when Fly has no requirements to report (the
+// certificate was deleted between the two reads). The hostname is still attached from
+// Marshal's point of view, so it must report a state rather than throw.
+function domainStateWithoutRequirements(certificate: FlyCertificate): ServiceDomainState {
+  return {
+    hostname: certificate.hostname,
+    verified: certificateIsVerified(certificate),
+    status: certificateIsVerified(certificate) ? "verified" : "awaiting_dns",
+    dns_records: [],
+    error: null,
+  };
 }
 
 export async function computeDomainStates(fly: FlyClient, appName: string, certificates: FlyCertificate[]): Promise<ServiceDomainState[]> {
   if (certificates.length === 0) return [];
-  const ips = await fly.getAppIps(appName);
-  return certificates
-    .slice()
-    .sort((a, b) => a.hostname < b.hostname ? -1 : 1)
-    .map((certificate) => ({
+  const sorted = certificates.slice().sort((a, b) => a.hostname < b.hostname ? -1 : 1);
+  // One read per hostname. Bounded by the number of domains on ONE service (single digits in
+  // practice), and it replaces the getAppIps call this used to make, so a single-domain
+  // service costs the same number of round trips as before.
+  return await Promise.all(sorted.map(async (certificate) => {
+    const requirements = await fly.getCertificateRequirements(appName, certificate.hostname);
+    if (requirements === null) return domainStateWithoutRequirements(certificate);
+    return {
       hostname: certificate.hostname,
-      verified: certificateIsVerified(certificate),
-      dns_records: dnsRecordsForCertificate(appName, certificate, ips.sharedIpv4, ips.dedicated.filter((ip) => ip.type === "v6").map((ip) => ip.address)),
-      error: null,
-    }));
+      verified: requirementsAreVerified(requirements),
+      status: domainStatusForRequirements(requirements),
+      dns_records: dnsRecordsForRequirements(requirements),
+      error: domainErrorForRequirements(requirements),
+    };
+  }));
 }
 
 async function releaseServicePublicIpsIfUnused(ns: string, serviceKey: string): Promise<void> {
@@ -492,32 +571,47 @@ async function attachDomain(ns: string, hostname: string, serviceKey: string): P
   }
   assertServiceCanHoldADomain(serviceKey, stored.spec.config.ports, stored.spec.config.public, "Change the service's ports first, then attach the domain.");
 
-  const existingClaim = await readDomainClaimVersioned(hostname);
+  let existingClaim = await readDomainClaimVersioned(hostname);
   if (existingClaim === null) {
     const claimed = await claimDomain({ hostname, ns, service_key: serviceKey, claimed_at_millis: Date.now() });
-    if (!claimed) throw conflict(`hostname ${JSON.stringify(hostname)} is already attached elsewhere`);
-  } else if (existingClaim.value.ns !== ns) {
-    // Never reveal which namespace holds it.
-    throw conflict(`hostname ${JSON.stringify(hostname)} is already attached elsewhere`);
-  } else if (existingClaim.value.service_key !== serviceKey) {
-    // Re-PUT within the namespace repoints: certificate moves from the old service's app.
-    //
-    // OWNERSHIP TRANSFERS FIRST, teardown second. The conditional rewrite is the only step
-    // that can lose a race, and losing it after the teardown would leave the registry still
-    // naming the previous service as owner while that service has already lost its TLS
-    // termination and its public IPs — a state no later code path repairs. In this order a
-    // failure after the rewrite leaves at worst an orphaned certificate on the old app, which
-    // the next attach or detach on that app reconciles.
-    const previousApp = appNameForService(config.envId, ns, existingClaim.value.service_key);
-    const rewritten = await rewriteDomainClaim(existingClaim, { hostname, ns, service_key: serviceKey, claimed_at_millis: Date.now() });
-    if (!rewritten) throw conflict(`hostname ${JSON.stringify(hostname)} changed owners concurrently; retry the attach`);
-    await fly.deleteCertificate(previousApp, hostname);
-    await releaseServicePublicIpsIfUnused(ns, existingClaim.value.service_key);
-  } else {
-    // Idempotent re-attach on the same service: re-assert the index entry, which repairs the
-    // case where a prior claim landed but its index write was lost (an orphaned claim that
-    // deleteService could otherwise never release).
-    await claimDomain(existingClaim.value);
+    // Losing this race does NOT mean someone ELSE holds the hostname: two concurrent attaches
+    // of the SAME hostname on the SAME service both read no claim and both try to create one,
+    // which is the concurrent form of the replay the same-service branch below treats as
+    // success. Re-read and let the ownership branches decide, so the loser reaches the same
+    // answer a sequential replay does instead of a spurious conflict.
+    if (!claimed) {
+      existingClaim = await readDomainClaimVersioned(hostname);
+      // Claimed and then released between the two reads: nobody owns it, and there is no
+      // ownership left to reconcile against, so the caller's retry is the honest answer.
+      if (existingClaim === null) throw conflict(`hostname ${JSON.stringify(hostname)} changed owners concurrently; retry the attach`);
+    }
+  }
+  // Skipped entirely when this request created the claim itself: there is no prior owner to
+  // reconcile against.
+  if (existingClaim !== null) {
+    if (existingClaim.value.ns !== ns) {
+      // Never reveal which namespace holds it.
+      throw conflict(`hostname ${JSON.stringify(hostname)} is already attached elsewhere`);
+    } else if (existingClaim.value.service_key !== serviceKey) {
+      // Re-PUT within the namespace repoints: certificate moves from the old service's app.
+      //
+      // OWNERSHIP TRANSFERS FIRST, teardown second. The conditional rewrite is the only step
+      // that can lose a race, and losing it after the teardown would leave the registry still
+      // naming the previous service as owner while that service has already lost its TLS
+      // termination and its public IPs — a state no later code path repairs. In this order a
+      // failure after the rewrite leaves at worst an orphaned certificate on the old app, which
+      // the next attach or detach on that app reconciles.
+      const previousApp = appNameForService(config.envId, ns, existingClaim.value.service_key);
+      const rewritten = await rewriteDomainClaim(existingClaim, { hostname, ns, service_key: serviceKey, claimed_at_millis: Date.now() });
+      if (!rewritten) throw conflict(`hostname ${JSON.stringify(hostname)} changed owners concurrently; retry the attach`);
+      await fly.deleteCertificate(previousApp, hostname);
+      await releaseServicePublicIpsIfUnused(ns, existingClaim.value.service_key);
+    } else {
+      // Idempotent re-attach on the same service: re-assert the index entry, which repairs the
+      // case where a prior claim landed but its index write was lost (an orphaned claim that
+      // deleteService could otherwise never release).
+      await claimDomain(existingClaim.value);
+    }
   }
 
   // A custom domain needs the same public ingress as `public: true`: allocate the shared
@@ -539,17 +633,33 @@ async function attachDomain(ns: string, hostname: string, serviceKey: string): P
     }
   }
 
-  const refreshedIps = await fly.getAppIps(appName);
+  return await domainResultFor(fly, appName, hostname, serviceKey, certificate);
+}
+
+/**
+ * The attach/read answer for one hostname, built from Fly's certificate requirements.
+ *
+ * Shared by both callers so a hostname reports the same records however it was reached —
+ * the earlier split let the attach response and the later polls disagree.
+ */
+async function domainResultFor(
+  fly: FlyClient,
+  appName: string,
+  hostname: string,
+  serviceKey: string,
+  certificate: FlyCertificate,
+): Promise<AttachDomainResult> {
+  const requirements = await fly.getCertificateRequirements(appName, hostname);
+  if (requirements === null) {
+    const state = domainStateWithoutRequirements(certificate);
+    return { hostname, service_key: serviceKey, verified: state.verified, status: state.status, dns_records: state.dns_records };
+  }
   return {
     hostname,
     service_key: serviceKey,
-    verified: certificate.clientStatus === "Ready",
-    dns_records: dnsRecordsForCertificate(
-      appName,
-      certificate,
-      refreshedIps.sharedIpv4,
-      refreshedIps.dedicated.filter((ip) => ip.type === "v6").map((ip) => ip.address),
-    ),
+    verified: requirementsAreVerified(requirements),
+    status: domainStatusForRequirements(requirements),
+    dns_records: dnsRecordsForRequirements(requirements),
   };
 }
 
@@ -571,18 +681,7 @@ async function readDomain(ns: string, hostname: string): Promise<AttachDomainRes
     // app was rebuilt) — same 404 the callers already translate into "deploy first".
     throw notFound(`hostname ${JSON.stringify(hostname)} has no certificate on service ${JSON.stringify(claim.service_key)}`);
   }
-  const ips = await fly.getAppIps(appName);
-  return {
-    hostname,
-    service_key: claim.service_key,
-    verified: certificate.clientStatus === "Ready",
-    dns_records: dnsRecordsForCertificate(
-      appName,
-      certificate,
-      ips.sharedIpv4,
-      ips.dedicated.filter((ip) => ip.type === "v6").map((ip) => ip.address),
-    ),
-  };
+  return await domainResultFor(fly, appName, hostname, claim.service_key, certificate);
 }
 
 // `expectedServiceKey` fences a stale detach: when the hostname has since been repointed to
@@ -890,7 +989,8 @@ export function createFlyProvider(): RuntimeProvider {
       async statesFor(ns, key) {
         const fly = flyFor(ns);
         const appName = appNameForService(getConfig().envId, ns, key);
-        return await computeDomainStates(fly, appName, await fly.listCertificates(appName));
+        const certificates = await fly.listCertificates(appName);
+        return await computeDomainStates(fly, appName, certificates);
       },
       async releaseForService(ns, key, _stored, lease) {
         const fly = flyFor(ns);

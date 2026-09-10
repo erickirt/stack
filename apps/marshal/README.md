@@ -105,6 +105,46 @@ The platform project and tenant projects must belong to the same organization. G
 
 Cloud Run has no equivalent of Fly's request-triggered VM suspend/resume for a persistent server. A `server` with `min_instances: 0` therefore remains eligible to run as its single GCE instance; it preserves availability and disk semantics but does not guarantee scale-to-zero billing.
 
+## Fly deployment platform domains
+
+Public HTTP services advertise `https://<suffix>.deploy.built-with-hexclave.com`, where
+`hxc-<suffix>` is the existing Fly app name. The name remains stable across redeploys.
+The dedicated Fly gateway in [apps/deployment-gateway](../deployment-gateway/README.md)
+proxies HTTP, streaming, and WebSockets to the existing `.fly.dev` origin. Provision its
+wildcard DNS/TLS before deploying this Marshal version. Hosted components remain on Vercel.
+
+Customer custom domains keep their existing provisioning and display priority; private
+services receive no generated platform URL. GCP routing is unchanged. The whole
+`deploy.built-with-hexclave.com` namespace is reserved from customer-domain attachment.
+There is no per-service DNS record, certificate issuance, or routing database, and no
+automatic fallback to `.fly.dev` during a gateway outage.
+
+## Parking
+
+`POST /v1/namespaces/:ns/services/:key/park` stops a service and runs the platform's
+parked page in its place; `POST .../unpark` puts the service's own image back. The backend
+calls both from its Free-plan sweeper (`apps/backend/src/lib/deployments/parking.tsx`); the
+page itself lives in
+[apps/deployment-gateway/parked-page](../deployment-gateway/parked-page/README.md).
+
+Parking swaps the image and the environment the machines run with, and nothing else. The
+Fly app, ports, public IPs, certificates, custom domains, volumes and the stored spec all
+survive, so the explanation answers on the platform hostname, on the `.fly.dev` name and on
+every custom domain, and unparking is a re-apply of the spec that was stored all along. The
+parked spec sets `min_instances: 0` and, on Fly, presents the service as `serverless`, so
+the machine sleeps and Fly Proxy wakes it on the next request: a parked service costs
+nothing to keep parked.
+
+Park is idempotent (a service already parked for the same reason with no failed apply
+behind it is left alone), and any ordinary apply unparks — which is what makes a redeploy
+the other way back. `GET /v1/namespaces/:ns/services/:key` reports `status: "parked"` and a
+`parked` object; a non-null `parked` with some other status is a park whose apply failed,
+meaning the tenant's image is still serving.
+
+A GCP `server` is the one gap: there the service type selects the resource kind rather than
+a scaling policy, so its VM keeps running the parked page rather than stopping. Nothing
+reaches it today, because a `server` is refused outright on the Free plan on GCP.
+
 ## Local GCP simulator
 
 Development and provider-dependent backend E2E tests use `docker/dependencies/gcp-mock`. It implements only the Google REST resources Marshal owns; tests that do not cross the provider boundary continue to use focused `GcpClient` fakes. Set `HEXCLAVE_MARSHAL_GCP_MOCK_URL=local` to derive the simulator address from `NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX`, or provide an explicit URL. Both forms require `MARSHAL_ALLOW_MOCKS=1`, and the introspection API also requires `HEXCLAVE_MARSHAL_GCP_MOCK_TOKEN` because it exposes resolved container environment values.
@@ -162,6 +202,63 @@ Marshal enables Compute Engine, Cloud Run, Artifact Registry, IAM, and Cloud Log
 For a disposable project created out-of-band, `HEXCLAVE_MARSHAL_GCP_EXISTING_PROJECT_ID_FOR_TESTS` bypasses project creation. It is guarded by `MARSHAL_ALLOW_MOCKS=1` and must never point at a production project.
 
 ## Disposable live verification
+
+### Fly gateway platform domains
+
+From the repository root, run:
+
+```sh
+pnpm -C apps/marshal test:platform-domains:live
+```
+
+The runner reads real Fly and S3 credentials from `apps/marshal/.env.local`, accepting either
+the `MARSHAL_*` names or `FLY_API_TOKEN`, `FLY_ORG_SLUG`, `S3_ACCESS_KEY_ID`,
+`S3_SECRET_ACCESS_KEY`, `S3_API_ENDPOINT`, and `S3_BUCKET_NAME`. No Vercel API token is required.
+Configure the dedicated gateway and wildcard DNS/TLS first, following its README.
+For an isolated test gateway on a separate domain, pass
+`HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN=deploy.example.net` to the command and configure the
+gateway with the same value. The production domain is the default when unset.
+`--help` prints usage without loading credentials or calling providers.
+
+The test creates one disposable Fly app/machine (which can incur usage charges), checks its
+default Fly HTTPS response and branded HTTPS proxy, redeploys while retaining the hostname,
+and verifies cleanup. It uses a pinned prebuilt Bun image and production service code;
+source builds and the backend/dashboard deployment flow are outside its scope. No custom
+certificate is requested, so the test does not consume custom-domain issuance quota.
+
+After the HTTP checks pass, the runner prints two `/compatibility` URLs. Open **both**
+in a browser and click **Run browser checks** on each page. Keep the terminal running. It waits up to ten minutes for reports from both origins before redeploy
+and cleanup. No browser packages need to be installed.
+
+The browser checks cover:
+- SSE and chunked responses: first and final markers must arrive at least 1.5 seconds apart
+  from an origin that waits 3 seconds, detecting a proxy that buffers the whole response.
+- WebSockets: upgrade, session cookie authentication, subprotocol negotiation, text and
+  binary echo, and a clean close.
+- Cookies: Secure host-only `__Host-`/HttpOnly sessions, explicit current-host Domain cookies,
+  Path scope, rejection of cookies scoped to the other origin, rotation, and logout.
+  Separate Set-Cookie headers and SameSite/Secure/HttpOnly/Path/Domain attributes are also
+  checked by the terminal probes.
+
+A failure on either origin fails the run and still triggers cleanup. These are compatibility
+fixtures, not tests of a particular application's OAuth flow. Cross-site iframe/third-party
+cookie policies, cross-site SameSite enforcement, long-lived connection limits, and large
+uploads remain outside this test. The fixture creates no parent-domain cookies.
+
+Test state is isolated under a unique `live-domain-tests/<run-id>/` S3 prefix. The runner
+cleans up after success, failure, or Ctrl+C. A complete pass exits **0**; test or cleanup
+failures exit **1**. A private recovery file containing the disposable identity and encryption
+key (no provider tokens) is printed before provisioning. If cleanup fails or the process is
+killed, retain that file and run:
+
+```sh
+pnpm -C apps/marshal test:platform-domains:live --cleanup /path/printed/by/the/test.untracked.json
+```
+
+Use the same Fly/S3 account for cleanup. The file is removed only after cleanup is verified.
+The live runner is not included in the normal Vitest suite.
+
+### GCP
 
 `src/gcp/live.test.ts` is opt-in because it creates billable resources. Set Application Default Credentials plus `HEXCLAVE_MARSHAL_GCP_LIVE_TEST=1`, `HEXCLAVE_MARSHAL_GCP_LIVE_BILLING_ACCOUNT`, and `HEXCLAVE_MARSHAL_GCP_LIVE_PLATFORM_PROJECT_ID`; optionally set `HEXCLAVE_MARSHAL_GCP_LIVE_PROJECT_PARENT=folders/<id>`. The existing platform project must have Compute Engine and Certificate Manager enabled and the controller roles documented above. Then run `pnpm -C apps/marshal test -- src/gcp/live.test.ts`.
 

@@ -1047,6 +1047,11 @@ export function normalizeHostnameOrThrow(hostname: string): string {
   if (!HOSTNAME_REGEX.test(normalized)) {
     throw new StatusError(400, `Invalid domain hostname ${JSON.stringify(hostname)} — must be a bare hostname like app.example.com, not a URL.`);
   }
+  // Match Marshal's reserved namespace before storing a customer-domain row.
+  // These addresses are provisioned by the platform and cannot be reassigned.
+  if (/^(?:.+\.)?deploy\.built-with-hexclave\.com$/.test(normalized)) {
+    throw new StatusError(400, "Deployment platform domains are managed automatically and cannot be used as custom domains.");
+  }
   return normalized;
 }
 
@@ -1890,6 +1895,19 @@ export async function refreshDeploymentFromMarshal(prisma: PrismaClientTransacti
       where: { tenancyId: tenancy.id, serviceId: { in: deployedServiceIds }, provisionedAt: null },
       data: { provisionedAt: new Date() },
     });
+    // A successful deploy restarts the Free plan's clock, and clears any park:
+    // Marshal unparks as a side effect of applying the tenant's image (see
+    // claimDesiredSpec), so leaving these columns set would leave the dashboard
+    // reporting a service as stopped while it serves.
+    //
+    // Unconditional, unlike the update above: `provisionedAt` records a thing that
+    // happened once, while this records the LATEST deploy, so every deploy writes
+    // it. Rows with no park to clear are written to anyway rather than filtered,
+    // which keeps this one statement instead of two.
+    await prisma.deploymentService.updateMany({
+      where: { tenancyId: tenancy.id, serviceId: { in: deployedServiceIds } },
+      data: { runningSince: new Date(), parkedAt: null, parkedReason: null },
+    });
   }
 }
 
@@ -2027,6 +2045,16 @@ export type DeploymentServiceApiShape = {
   // single-entry record keyed by volume id.
   persistent_volumes: Record<string, { path: string, size_gb: number }> | null,
   provisioned: boolean,
+  // Set while the service is PARKED: stopped by the platform, with an explanation
+  // served in its place on every hostname it holds. Reported alongside `status`
+  // rather than as one of its values because the two answer different questions —
+  // the last DEPLOY still succeeded or failed on its own terms, and a reader
+  // needs both to understand what they are looking at.
+  //
+  // `parked_reason` is what decides the wording shown to the project's own team;
+  // "free_plan_24h" is the only value today (see FREE_PLAN_PARK_REASON).
+  parked_at: string | null,
+  parked_reason: string | null,
   status: "not_deployed" | "queued" | "building" | "deploying" | "deployed" | "failed" | "canceled",
   has_successful_deploy: boolean,
   url: string | null,
@@ -2227,6 +2255,8 @@ export async function serviceToApiShape(options: {
     start_command: row.startCommand,
     persistent_volumes: definition.persistent_volumes ?? null,
     provisioned: row.provisionedAt != null,
+    parked_at: row.parkedAt?.toISOString() ?? null,
+    parked_reason: row.parkedReason,
     status,
     has_successful_deploy: hasSuccessfulDeploy,
     url,

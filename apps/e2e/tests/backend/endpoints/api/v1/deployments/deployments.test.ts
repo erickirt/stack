@@ -291,6 +291,11 @@ describe("definition sync", () => {
       max_instances: 3,
       root_directory: "api",
       provisioned: false,
+      // Never parked before it has ever run. Reported as its own field rather
+      // than as a status, because a parked service still has a last deploy that
+      // succeeded or failed on its own terms.
+      parked_at: null,
+      parked_reason: null,
       status: "not_deployed",
       has_successful_deploy: false,
       url: null,
@@ -1419,18 +1424,20 @@ describe("deploys against the Marshal runtime", () => {
     expect((service.body as any).url).toBeNull();
   });
 
-  it("gives public services a fly.dev endpoint and removes ingress when they become private", { timeout: 180_000 }, async ({ expect }) => {
+  it("gives public services a deterministic proxy endpoint without certificates and removes ingress when private", { timeout: 180_000 }, async ({ expect }) => {
     await Project.createAndSwitch();
     const serviceId = uniqueServiceId("public");
 
     const first = await syncServiceAndUpload(serviceId, { public: true, ports: { 3000: { protocol: "http" } } });
     const publicRun = await pollDeploymentToStatus(await startDeploy({ sourceId: first.sourceId, uploadId: first.uploadId, definitionSyncId: first.definitionSyncId, levels: [[serviceId]] }), "deployed");
-    expect(serviceOutcome(publicRun, serviceId).url).toMatch(/^https:\/\/hxc-.+\.fly\.dev$/);
+    expect(serviceOutcome(publicRun, serviceId).url).toMatch(/^https:\/\/[^.]+\.deploy\.built-with-hexclave\.com$/);
     const publicService = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
     expect((publicService.body as any).public).toBe(true);
     expect((publicService.body as any).ports).toEqual({ 3000: { protocol: "http" } });
     expect((publicService.body as any).url).toBe(serviceOutcome(publicRun, serviceId).url);
     const publicApp = await findMockApp(serviceId);
+    expect(serviceOutcome(publicRun, serviceId).url).toBe(`https://${publicApp.name.slice(4)}.deploy.built-with-hexclave.com`);
+    expect(publicApp.certificates).toEqual([]);
     expect(publicApp.sharedIpv4).not.toBeNull();
     expect(publicApp.dedicatedIps.some((ip) => ip.type === "v6")).toBe(true);
 
@@ -1717,6 +1724,21 @@ describe("deploys against the Marshal runtime", () => {
 });
 
 describe("domains", () => {
+  it("reserves deployment platform hostnames without creating custom-domain claims", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("reserved-domain");
+    await syncServices({ [serviceId]: { type: "serverless", public: true, ports: { 3000: { protocol: "http" } }, env: {} } });
+    for (const hostname of ["Example.deploy.built-with-hexclave.com", "deploy.built-with-hexclave.com", "nested.example.deploy.built-with-hexclave.com"]) {
+      const response = await niceBackendFetch(`/api/v1/deployments/services/${encodeURIComponent(serviceId)}/domains`, {
+        method: "POST",
+        accessType: "admin",
+        body: { hostname, is_primary: true },
+      });
+      expect(response.status).toBe(400);
+      expect(JSON.stringify(response.body)).toContain("managed automatically");
+    }
+  });
+
   it("adds a domain, reports its DNS records, and removes it", { timeout: 120_000 }, async ({ expect }) => {
     await Project.createAndSwitch();
     const serviceId = uniqueServiceId("domained");
@@ -1763,6 +1785,77 @@ describe("domains", () => {
     expect(deleteResponse.status).toBe(200);
     const serviceAfterDelete = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
     expect((serviceAfterDelete.body as any).url).toBeNull();
+  });
+
+  it("treats a replayed add of the same hostname on the same service as success", { timeout: 120_000 }, async ({ expect }) => {
+    // The SDK re-issues a request on the next API host whenever one times out or answers 5xx
+    // (`_withFallback`), and it does not spare non-idempotent methods; the dashboard's Add
+    // button also stays live during the seconds an attach takes. Both replay this POST after
+    // the first attempt has already committed the row, and answering 400 there told users
+    // their domain had failed to be added while it was in fact live.
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("replayed");
+    const { uploadId, definitionSyncId, sourceId } = await syncServiceAndUpload(serviceId);
+    await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[serviceId]] }), "deployed");
+
+    const hostname = `${serviceId}.verified.test`;
+    const add = () => niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains`, {
+      method: "POST",
+      accessType: "admin",
+      body: { hostname, is_primary: true },
+    });
+
+    const firstAdd = await add();
+    expect(firstAdd.status).toBe(201);
+
+    const replayedAdd = await add();
+    expect(replayedAdd.status).toBe(201);
+    // The replay reports the state that exists, is_primary included — it must not silently
+    // report a different domain than the one the first attempt actually created.
+    expect(replayedAdd.body).toEqual(firstAdd.body);
+
+    // The replay is a re-assert, not a re-create: still exactly one row, still attached, and
+    // the service still advertises it.
+    const listed = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
+    expect((listed.body as any).domains.filter((domain: any) => domain.hostname === hostname)).toHaveLength(1);
+    expect((listed.body as any).url).toBe(`https://${hostname}`);
+    const read = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains/${hostname}`, { accessType: "admin" });
+    expect(read.status).toBe(200);
+    expect((read.body as any).verified).toBe(true);
+
+    // Still removable exactly once — a replay must not have left a second claim behind.
+    const deleted = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains/${hostname}`, {
+      method: "DELETE",
+      accessType: "admin",
+    });
+    expect(deleted.status).toBe(200);
+    const afterDelete = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains/${hostname}`, { accessType: "admin" });
+    expect(afterDelete.status).toBe(404);
+  });
+
+  it("treats a CONCURRENT replay on the same service as success", { timeout: 120_000 }, async ({ expect }) => {
+    // The host ring hops on a TIMEOUT, so the request it gave up waiting for can still be in
+    // flight when the replay lands. That pair races on the database reservation and takes the
+    // other duplicate branch (the one behind `skipDuplicates`), which must reach the same
+    // answer as the sequential case above.
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("replay-race");
+    const { uploadId, definitionSyncId, sourceId } = await syncServiceAndUpload(serviceId);
+    await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[serviceId]] }), "deployed");
+
+    const hostname = `${serviceId}.verified.test`;
+    const [first, second] = await Promise.all([
+      niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains`, {
+        method: "POST", accessType: "admin", body: { hostname },
+      }),
+      niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains`, {
+        method: "POST", accessType: "admin", body: { hostname },
+      }),
+    ]);
+    expect([first.status, second.status]).toEqual([201, 201]);
+
+    const listed = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
+    expect((listed.body as any).domains.filter((domain: any) => domain.hostname === hostname)).toHaveLength(1);
   });
 
   it("rejects a hostname already attached to another project's service", { timeout: 120_000 }, async ({ expect }) => {
